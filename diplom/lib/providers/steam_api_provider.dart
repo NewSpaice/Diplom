@@ -15,10 +15,12 @@ class SteamApiProvider extends ChangeNotifier {
 
   Future<void> _loadApiKey() async {
     _apiKey = _prefs.getString(_apiKeyKey);
+    print('Loaded API Key: ${_apiKey != null ? 'Key exists' : 'No key found'}');
     notifyListeners();
   }
 
   Future<void> setApiKey(String key) async {
+    print('Setting new API Key');
     await _prefs.setString(_apiKeyKey, key);
     _apiKey = key;
     notifyListeners();

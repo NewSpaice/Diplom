@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/steam_service.dart';
 import '../providers/steam_api_provider.dart';
+import '../providers/theme_provider.dart';
 import 'package:provider/provider.dart';
 
 class ProfileScreen extends StatefulWidget {
@@ -17,6 +18,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   bool _isLoading = true;
   Map<String, dynamic>? _profileData;
   Map<String, dynamic>? _statsData;
+  SteamService? _steamService;
 
 bool _isInitialized = false;
 
@@ -38,10 +40,22 @@ void didChangeDependencies() {
     }
 
     final prefs = await SharedPreferences.getInstance();
-    final steamService = SteamService(apiProvider.apiKey!, prefs);
+    _steamService = SteamService(apiProvider.apiKey!, prefs);
+    
+    // Загружаем константы рангов
+    await _steamService!.getRankConstants();
 
-    final profileData = await steamService.getPlayerProfile(widget.steamId);
-    final statsData = await steamService.getPlayerStats(widget.steamId);
+    // Сначала загружаем профиль
+    final profileData = await _steamService!.getPlayerProfile(widget.steamId);
+    
+    // Загружаем статистику отдельно, чтобы при ошибке основной профиль все равно показался
+    Map<String, dynamic>? statsData;
+    try {
+      statsData = await _steamService!.getPlayerStats(widget.steamId);
+    } catch (e) {
+      print('Error loading player stats: $e');
+      // Статистика не загрузилась, но это не критично
+    }
 
     setState(() {
       _profileData = profileData;
@@ -55,7 +69,19 @@ void didChangeDependencies() {
 
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Ошибка загрузки профиля: $e')),
+        SnackBar(
+          content: Text('Ошибка загрузки профиля: $e'),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'Повторить',
+            onPressed: () {
+              setState(() {
+                _isLoading = true;
+              });
+              _loadProfile();
+            },
+          ),
+        ),
       );
     }
   }
@@ -64,70 +90,243 @@ void didChangeDependencies() {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(
+        title: const Text('Профиль игрока'),
+        actions: [
+          IconButton(
+            icon: Icon(
+              context.watch<ThemeProvider>().isDarkMode
+                  ? Icons.light_mode
+                  : Icons.dark_mode,
+            ),
+            onPressed: () {
+              context.read<ThemeProvider>().toggleTheme();
+            },
+            tooltip: context.watch<ThemeProvider>().isDarkMode
+                ? 'Светлая тема'
+                : 'Темная тема',
+          ),
+        ],
+      ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : _profileData == null
               ? const Center(child: Text('Не удалось загрузить профиль'))
-              : CustomScrollView(
-                  slivers: [
-                    SliverAppBar(
-                      expandedHeight: 200,
-                      pinned: true,
-                      flexibleSpace: FlexibleSpaceBar(
-                        title: Text(_profileData!['response']['players'][0]['personaname'] ?? 'Профиль'),
-                        background: Image.network(
-                          _profileData!['response']['players'][0]['avatarfull'] ??
-                              'https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/fe/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg',
-                          fit: BoxFit.cover,
-                        ),
+              : SingleChildScrollView(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Профиль игрока
+                      _buildPlayerCard(),
+                      const SizedBox(height: 16),
+                      
+                      // Основная информация
+                      _buildInfoCard(
+                        'Основная информация',
+                        [
+                          _buildInfoRow(
+                            'Дата регистрации',
+                            _formatDate(_profileData!['response']['players'][0]['timecreated']),
+                          ),
+                          _buildInfoRow(
+                            'Последний онлайн',
+                            _formatDate(_profileData!['response']['players'][0]['lastlogoff']),
+                          ),
+                        ],
                       ),
-                    ),
-                    SliverToBoxAdapter(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            _buildInfoCard(
-                              'Основная информация',
-                              [
-                                _buildInfoRow('Steam ID', widget.steamId),
-                                _buildInfoRow(
-                                  'Дата регистрации',
-                                  _formatDate(_profileData!['response']['players'][0]['timecreated']),
+                      const SizedBox(height: 16),
+                      
+                      // Статистика Dota 2
+                      if (_statsData != null) ...[
+                        _buildInfoCard(
+                          'Статистика Dota 2',
+                          [
+                            _buildInfoRow(
+                              'Всего матчей',
+                              _statsData!['total_matches'].toString(),
+                            ),
+                            _buildInfoRow(
+                              'Победы',
+                              '${_statsData!['wins']} (${_statsData!['win_rate']?.toStringAsFixed(1) ?? '0.0'}%)',
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                      ] else ...[
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16.0),
+                            child: Column(
+                              children: [
+                                Icon(
+                                  Icons.info_outline,
+                                  size: 48,
+                                  color: Colors.grey[400],
                                 ),
-                                _buildInfoRow(
-                                  'Последний онлайн',
-                                  _formatDate(_profileData!['response']['players'][0]['lastlogoff']),
+                                const SizedBox(height: 8),
+                                Text(
+                                  'Статистика недоступна',
+                                  style: TextStyle(
+                                    fontSize: 16,
+                                    color: Colors.grey[600],
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  'Попробуйте обновить страницу',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: Colors.grey[500],
+                                  ),
                                 ),
                               ],
                             ),
-                            const SizedBox(height: 16),
-                            if (_statsData != null) ...[
-                              _buildInfoCard(
-                                'Статистика Dota 2',
-                                [
-                                  _buildInfoRow(
-                                    'Всего матчей',
-                                    _statsData!['total_matches'].toString(),
-                                  ),
-                                  _buildInfoRow(
-                                    'Победы',
-                                    '${_statsData!['wins']} (${_calculateWinRate(_statsData!['wins'], _statsData!['total_matches'])}%)',
-                                  ),
-                                  _buildInfoRow(
-                                    'Средний KDA',
-                                    _calculateKDA(_statsData!['kills'], _statsData!['deaths'], _statsData!['assists']),
-                                  ),
-                                ],
-                              ),
-                            ],
-                          ],
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                      ],
+                      
+                      // Ранг
+                      if (_statsData != null && _statsData!['rank_tier'] != null && _statsData!['rank_tier'] > 0) ...[
+                        _buildRankCard(),
+                        const SizedBox(height: 16),
+                      ],
+                    ],
+                  ),
+                ),
+    );
+  }
+
+  Widget _buildPlayerCard() {
+    final player = _profileData!['response']['players'][0];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Row(
+          children: [
+            // Аватар
+            ClipRRect(
+              borderRadius: BorderRadius.circular(8.0),
+              child: Image.network(
+                player['avatarfull'] ??
+                    'https://steamcdn-a.akamaihd.net/steamcommunity/public/images/avatars/fe/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg',
+                width: 80,
+                height: 80,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(width: 16),
+            
+            // Информация об игроке
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    player['personaname'] ?? 'Неизвестный игрок',
+                    style: const TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    _getOnlineStatus(player['personastate']),
+                    style: TextStyle(
+                      color: _getOnlineStatusColor(player['personastate']),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRankCard() {
+    final rankTier = _statsData!['rank_tier'];
+    final leaderboardRank = _statsData!['leaderboard_rank'];
+    
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Ранг',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 16),
+            Row(
+              children: [
+                // Настоящая медалька ранга из локальных ассетов
+                Container(
+                  width: 60,
+                  height: 60,
+                  child: Image.asset(
+                    _getRankImageUrl(rankTier),
+                    width: 60,
+                    height: 60,
+                    fit: BoxFit.contain,
+                    errorBuilder: (context, error, stackTrace) {
+                      print('❌ Local rank image failed: $error');
+                      print('🎨 Using colored icon fallback for rank $rankTier');
+                      
+                      // Если локальное изображение не найдено, показываем цветную иконку
+                      return Container(
+                        width: 60,
+                        height: 60,
+                        decoration: BoxDecoration(
+                          color: _getRankColor(rankTier),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Icon(
+                          Icons.military_tech,
+                          color: Colors.white,
+                          size: 30,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _getRankName(rankTier),
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
                         ),
                       ),
-                    ),
-                  ],
+                      if (leaderboardRank != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          'Позиция в таблице лидеров: #$leaderboardRank',
+                          style: const TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
                 ),
+              ],
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -181,13 +380,120 @@ void didChangeDependencies() {
     return '${date.day}.${date.month}.${date.year}';
   }
 
-  String _calculateWinRate(int wins, int total) {
-    if (total == 0) return '0';
-    return ((wins / total) * 100).toStringAsFixed(1);
+  String _getRankName(int rankTier) {
+    if (rankTier == 0) return 'Без ранга';
+    
+    final rankNumber = (rankTier / 10).floor();
+    final rankStar = rankTier % 10;
+    
+    String rankName;
+    switch (rankNumber) {
+      case 1:
+        rankName = 'Herald';
+        break;
+      case 2:
+        rankName = 'Guardian';
+        break;
+      case 3:
+        rankName = 'Crusader';
+        break;
+      case 4:
+        rankName = 'Archon';
+        break;
+      case 5:
+        rankName = 'Legend';
+        break;
+      case 6:
+        rankName = 'Ancient';
+        break;
+      case 7:
+        rankName = 'Divine';
+        break;
+      case 8:
+        return 'Immortal';
+      default:
+        return 'Неизвестный ранг';
+    }
+    
+    return '$rankName $rankStar';
   }
 
-  String _calculateKDA(int kills, int deaths, int assists) {
-    if (deaths == 0) return '${kills + assists}';
-    return ((kills + assists) / deaths).toStringAsFixed(2);
+  String _getRankImageUrl(int rankTier) {
+    String imagePath;
+    
+    if (_steamService != null) {
+      imagePath = _steamService!.getRankImageUrl(rankTier);
+    } else {
+      // Fallback если steamService не инициализирован - используем локальные ассеты
+      if (rankTier == 0) {
+        imagePath = 'ranks/rank_icon_0.png';
+      } else {
+        imagePath = 'ranks/rank_icon_$rankTier.png';
+      }
+    }
+    
+    print('🏅 Rank $rankTier medal image path (WEBP): $imagePath');
+    return imagePath;
+  }
+
+  String _getOnlineStatus(int? personastate) {
+    switch (personastate) {
+      case 0:
+        return 'Не в сети';
+      case 1:
+        return 'В сети';
+      case 2:
+        return 'Занят';
+      case 3:
+        return 'Отошёл';
+      case 4:
+        return 'Дремлет';
+      case 5:
+        return 'Ищет игру';
+      case 6:
+        return 'Играет';
+      default:
+        return 'Неизвестно';
+    }
+  }
+
+  Color _getOnlineStatusColor(int? personastate) {
+    switch (personastate) {
+      case 1:
+        return Colors.green;
+      case 6:
+        return Colors.blue;
+      case 2:
+      case 3:
+      case 4:
+      case 5:
+        return Colors.orange;
+      default:
+        return Colors.grey;
+    }
+  }
+
+  Color _getRankColor(int rankTier) {
+    final rankNumber = (rankTier / 10).floor();
+    switch (rankNumber) {
+      case 1:
+        return Colors.brown;
+      case 2:
+        return Colors.grey;
+      case 3:
+        return Colors.orange;
+      case 4:
+        return Colors.purple;
+      case 5:
+        return Colors.blue;
+      case 6:
+        return Colors.cyan;
+      case 7:
+        return Colors.yellow[700]!;
+      case 8:
+        return Colors.red;
+      default:
+        return Colors.grey;
+    }
   }
 } 

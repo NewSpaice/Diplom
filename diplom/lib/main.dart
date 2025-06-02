@@ -11,8 +11,10 @@ import 'screens/matches_screen.dart';
 import 'screens/heroes_screen.dart';
 import 'screens/friends_stats_screen.dart';
 import 'screens/steam_login_screen.dart';
+import 'screens/api_key_screen.dart';
 import 'services/steam_auth_service.dart';
 import 'providers/steam_api_provider.dart';
+import 'providers/theme_provider.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,11 +31,13 @@ void main() async {
   final prefs = await SharedPreferences.getInstance();
   final authService = SteamAuthService(prefs);
   final apiProvider = SteamApiProvider(prefs);
+  final themeProvider = ThemeProvider();
   
   runApp(
     MultiProvider(
       providers: [
         ChangeNotifierProvider(create: (_) => apiProvider),
+        ChangeNotifierProvider(create: (_) => themeProvider),
       ],
       child: MyApp(authService: authService),
     ),
@@ -47,13 +51,33 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Dota 2 Stats',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
-      home: LoginScreen(authService: authService),
+    return Consumer2<SteamApiProvider, ThemeProvider>(
+      builder: (context, apiProvider, themeProvider, child) {
+        if (apiProvider.apiKey == null) {
+          return MaterialApp(
+            title: 'Dota 2 Stats',
+            debugShowCheckedModeBanner: false,
+            theme: ThemeProvider.lightTheme,
+            darkTheme: ThemeProvider.darkTheme,
+            themeMode: themeProvider.themeMode,
+            home: ApiKeyScreen(),
+            routes: {
+              '/api-key': (context) => ApiKeyScreen(),
+            },
+          );
+        }
+        return MaterialApp(
+          title: 'Dota 2 Stats',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeProvider.lightTheme,
+          darkTheme: ThemeProvider.darkTheme,
+          themeMode: themeProvider.themeMode,
+          home: LoginScreen(authService: authService),
+          routes: {
+            '/api-key': (context) => ApiKeyScreen(),
+          },
+        );
+      },
     );
   }
 }
@@ -67,54 +91,6 @@ class LoginScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final apiProvider = context.watch<SteamApiProvider>();
     
-    if (apiProvider.apiKey == null) {
-      return Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Text(
-                  'Dota 2 Stats',
-                  style: TextStyle(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(height: 32),
-                const Text(
-                  'Для работы приложения необходим API ключ Steam',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 16),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  decoration: const InputDecoration(
-                    labelText: 'API ключ Steam',
-                    border: OutlineInputBorder(),
-                  ),
-                  onSubmitted: (value) async {
-                    await apiProvider.setApiKey(value);
-                  },
-                ),
-                const SizedBox(height: 16),
-                TextButton(
-                  onPressed: () async {
-                    const url = 'https://steamcommunity.com/dev/apikey';
-                    if (await canLaunchUrl(Uri.parse(url))) {
-                      await launchUrl(Uri.parse(url));
-                    }
-                  },
-                  child: const Text('Получить API ключ'),
-                ),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
     return Scaffold(
       body: Center(
         child: Column(
@@ -128,6 +104,16 @@ class LoginScreen extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 32),
+            TextButton(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (context) => ApiKeyScreen()),
+                );
+              },
+              child: const Text('Изменить API ключ'),
+            ),
+            const SizedBox(height: 16),
             ElevatedButton.icon(
               onPressed: () async {
                 if (await authService.isAuthenticated()) {
