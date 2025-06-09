@@ -6,7 +6,7 @@ import 'package:url_launcher/url_launcher.dart';
 class SteamAuthService {
   static const String _steamLoginUrl = 'https://steamcommunity.com/openid/login';
   static const String _returnUrl = 'http://localhost:8080/auth/steam/callback';
-  static const String _realm = 'http://localhost:8080/';
+  static const String _realm = 'http://localhost:8080';
   
   final SharedPreferences _prefs;
   

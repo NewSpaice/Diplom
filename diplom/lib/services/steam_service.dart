@@ -16,7 +16,7 @@ class SteamService {
   
   // Добавляем контроль задержек
   DateTime? _lastRequestTime;
-  static const Duration _requestDelay = Duration(milliseconds: 1000);
+  static const Duration _requestDelay = Duration(milliseconds: 3000);
   
   SteamService(this.apiKey, this.prefs);
   
@@ -33,13 +33,13 @@ class SteamService {
     try {
       print('Getting player profile for steamId: $steamId');
       
-      // Проверяем кэш
+      // Проверяем кэш с увеличенным временем жизни
       final cacheKey = 'profile_$steamId';
       final cachedData = _cache[cacheKey];
       if (cachedData != null) {
         final cacheTime = cachedData['timestamp'] as DateTime;
-        if (DateTime.now().difference(cacheTime) < _cacheDuration) {
-          print('Returning cached profile data');
+        if (DateTime.now().difference(cacheTime) < const Duration(hours: 4)) {
+          print('✅ Returning cached profile data');
           return cachedData['data'] as Map<String, dynamic>;
         }
       }
@@ -52,7 +52,47 @@ class SteamService {
       
       final response = await http.get(Uri.parse(url));
       print('Profile response status: ${response.statusCode}');
-      print('Profile response body: ${response.body}');
+      
+      if (response.statusCode == 429) {
+        print('⚠️ Rate limit exceeded for profile, using exponential backoff...');
+        
+        // Экспоненциальная задержка для профиля
+        for (int attempt = 1; attempt <= 3; attempt++) {
+          final delay = Duration(seconds: 10 * attempt); // 10, 20, 30 секунд
+          print('🕐 Waiting ${delay.inSeconds} seconds before profile retry attempt $attempt');
+          await Future.delayed(delay);
+          
+          final retryResponse = await http.get(Uri.parse(url));
+          print('Profile retry $attempt response status: ${retryResponse.statusCode}');
+          
+          if (retryResponse.statusCode == 200) {
+            final data = json.decode(retryResponse.body);
+            
+            // Проверяем, что в ответе есть игроки
+            if (data['response']?['players'] == null || (data['response']['players'] as List).isEmpty) {
+              throw Exception('Игрок не найден или профиль приватный');
+            }
+            
+            // Сохраняем в кэш с длительным временем жизни
+            _cache[cacheKey] = {
+              'data': data,
+              'timestamp': DateTime.now(),
+            };
+            
+            print('✅ Profile loaded after retry $attempt');
+            return data;
+            
+          } else if (retryResponse.statusCode == 429) {
+            print('⚠️ Still rate limited for profile after attempt $attempt');
+            continue;
+          } else {
+            print('❌ Different error for profile after retry $attempt: ${retryResponse.statusCode}');
+            break;
+          }
+        }
+        
+        throw Exception('Превышен лимит запросов к API. Попробуйте позже.');
+      }
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
@@ -62,7 +102,7 @@ class SteamService {
           throw Exception('Игрок не найден или профиль приватный');
         }
         
-        // Сохраняем в кэш
+        // Сохраняем в кэш с длительным временем жизни
         _cache[cacheKey] = {
           'data': data,
           'timestamp': DateTime.now(),
@@ -165,6 +205,17 @@ class SteamService {
     try {
       print('👥 Getting friends list for steamId: $steamId');
       
+      // Проверяем кэш
+      final cacheKey = 'friends_list_$steamId';
+      final cachedData = _cache[cacheKey];
+      if (cachedData != null) {
+        final cacheTime = cachedData['timestamp'] as DateTime;
+        if (DateTime.now().difference(cacheTime) < const Duration(hours: 6)) {
+          print('✅ Returning cached friends list');
+          return cachedData['data'] as Map<String, dynamic>;
+        }
+      }
+      
       // Ждем, чтобы не превысить лимит
       await _waitForRateLimit();
       
@@ -173,6 +224,12 @@ class SteamService {
       );
       
       print('Friends list response status: ${response.statusCode}');
+      
+      if (response.statusCode == 429) {
+        print('⚠️ Rate limit exceeded, waiting 10 seconds...');
+        await Future.delayed(const Duration(seconds: 10));
+        return getFriendsList(steamId); // Рекурсивный вызов после задержки
+      }
       
       if (response.statusCode == 200) {
         final data = json.decode(response.body) as Map<String, dynamic>;
@@ -214,40 +271,117 @@ class SteamService {
           }
         }
         
-        // Получаем профили всех друзей (ограничиваем первыми 100)
+        // Получаем профили друзей порциями по 50 человек
         if (steamIds.isNotEmpty) {
-          final steamIdsString = steamIds.take(100).join(',');
+          const int batchSize = 50;
+          final List<List<String>> batches = [];
           
-          await _waitForRateLimit();
+          for (int i = 0; i < steamIds.length; i += batchSize) {
+            final end = (i + batchSize < steamIds.length) ? i + batchSize : steamIds.length;
+            batches.add(steamIds.sublist(i, end));
+          }
           
-          final profilesResponse = await http.get(
-            Uri.parse('$_baseUrl$_steamApi/GetPlayerSummaries/v0002/?key=$apiKey&steamids=$steamIdsString'),
-          );
+          print('📦 Loading friend profiles in ${batches.length} batches');
           
-          if (profilesResponse.statusCode == 200) {
-            final profilesData = json.decode(profilesResponse.body) as Map<String, dynamic>;
-            final profiles = profilesData['response']?['players'] as List? ?? [];
+          for (int batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+            final batch = batches[batchIndex];
+            final steamIdsString = batch.join(',');
             
-            // Объединяем данные друзей с их профилями
-            for (var friend in typedFriends) {
-              final friendSteamId = friend['steamid'];
+            // Ждем между батчами
+            if (batchIndex > 0) {
+              await _waitForRateLimit();
+            }
+            
+            try {
+              final profilesResponse = await http.get(
+                Uri.parse('$_baseUrl$_steamApi/GetPlayerSummaries/v0002/?key=$apiKey&steamids=$steamIdsString'),
+              );
               
-              for (var profile in profiles) {
-                if (profile is Map && profile['steamid'] == friendSteamId) {
-                  final typedProfile = Map<String, dynamic>.from(profile);
-                  friend.addAll(typedProfile);
-                  break;
+              if (profilesResponse.statusCode == 429) {
+                print('⚠️ Rate limit exceeded in batch $batchIndex, using exponential backoff...');
+                
+                // Экспоненциальная задержка для батча профилей: 10, 20, 30 секунд
+                for (int attempt = 1; attempt <= 3; attempt++) {
+                  final delay = Duration(seconds: 10 * attempt);
+                  print('🕐 Waiting ${delay.inSeconds} seconds before batch retry attempt $attempt');
+                  await Future.delayed(delay);
+                  
+                  final retryResponse = await http.get(
+                    Uri.parse('$_baseUrl$_steamApi/GetPlayerSummaries/v0002/?key=$apiKey&steamids=$steamIdsString'),
+                  );
+                  
+                  if (retryResponse.statusCode == 200) {
+                    final profilesData = json.decode(retryResponse.body) as Map<String, dynamic>;
+                    final profiles = profilesData['response']?['players'] as List? ?? [];
+                    
+                    // Объединяем данные друзей с их профилями
+                    for (var friend in typedFriends) {
+                      final friendSteamId = friend['steamid'];
+                      
+                      for (var profile in profiles) {
+                        if (profile is Map && profile['steamid'] == friendSteamId) {
+                          final typedProfile = Map<String, dynamic>.from(profile);
+                          friend.addAll(typedProfile);
+                          break;
+                        }
+                      }
+                    }
+                    
+                    print('✅ Loaded batch ${batchIndex + 1}/${batches.length} (${profiles.length} profiles) after retry $attempt');
+                    break; // Выходим из цикла retry если успешно
+                    
+                  } else if (retryResponse.statusCode == 429) {
+                    print('⚠️ Still rate limited for batch $batchIndex after attempt $attempt');
+                    if (attempt == 3) {
+                      print('❌ Skipping batch $batchIndex after all retry attempts failed');
+                    }
+                    continue;
+                  } else {
+                    print('❌ Different error for batch $batchIndex after retry $attempt: ${retryResponse.statusCode}');
+                    break;
+                  }
                 }
+              } else if (profilesResponse.statusCode == 200) {
+                final profilesData = json.decode(profilesResponse.body) as Map<String, dynamic>;
+                final profiles = profilesData['response']?['players'] as List? ?? [];
+                
+                // Объединяем данные друзей с их профилями
+                for (var friend in typedFriends) {
+                  final friendSteamId = friend['steamid'];
+                  
+                  for (var profile in profiles) {
+                    if (profile is Map && profile['steamid'] == friendSteamId) {
+                      final typedProfile = Map<String, dynamic>.from(profile);
+                      friend.addAll(typedProfile);
+                      break;
+                    }
+                  }
+                }
+                
+                print('✅ Loaded batch ${batchIndex + 1}/${batches.length} (${profiles.length} profiles)');
+              } else {
+                print('❌ Error loading batch $batchIndex: ${profilesResponse.statusCode}');
               }
+            } catch (e) {
+              print('❌ Error in batch $batchIndex: $e');
             }
           }
         }
         
-        return {
+        final result = {
           'friendslist': {
             'friends': typedFriends
           }
         };
+        
+        // Сохраняем в кэш
+        _cache[cacheKey] = {
+          'data': result,
+          'timestamp': DateTime.now(),
+        };
+        
+        print('✅ Successfully loaded ${typedFriends.length} friends');
+        return result;
         
       } else {
         throw Exception('Failed to load friends list: ${response.statusCode}');
@@ -514,7 +648,7 @@ class SteamService {
       final cachedData = _cache[cacheKey];
       if (cachedData != null) {
         final cacheTime = cachedData['timestamp'] as DateTime;
-        if (DateTime.now().difference(cacheTime) < _cacheDuration) {
+        if (DateTime.now().difference(cacheTime) < const Duration(hours: 6)) {
           print('✅ Returning cached matches with friend');
           return List<Map<String, dynamic>>.from(cachedData['data']);
         }
@@ -556,7 +690,7 @@ class SteamService {
           }
         }
         
-        // Сохраняем в кэш
+        // Сохраняем в кэш с увеличенным временем жизни
         _cache[cacheKey] = {
           'data': result,
           'timestamp': DateTime.now(),
@@ -566,56 +700,70 @@ class SteamService {
         return result;
         
       } else if (response.statusCode == 429) {
-        print('⚠️ Rate limit exceeded (429), waiting and retrying...');
-        await Future.delayed(const Duration(seconds: 5));
+        print('⚠️ Rate limit exceeded (429), using exponential backoff...');
         
-        // Повторная попытка
-        final retryResponse = await _client.get(Uri.parse(url));
-        if (retryResponse.statusCode == 200) {
-          final data = json.decode(retryResponse.body) as List;
-          print('Matches with friend count (retry): ${data.length}');
+        // Экспоненциальная задержка: 5, 10, 20 секунд
+        for (int attempt = 1; attempt <= 3; attempt++) {
+          final delay = Duration(seconds: 5 * attempt);
+          print('🕐 Waiting ${delay.inSeconds} seconds before retry attempt $attempt');
+          await Future.delayed(delay);
           
-          // Проверяем, достигли ли мы лимита API при повторной попытке
-          if (data.length >= 1000) {
-            print('⚠️ WARNING: Reached API limit of 1000 matches (retry). There may be more matches available.');
-          }
-          
-          // Преобразуем данные с правильной типизацией
-          final List<Map<String, dynamic>> result = [];
-          
-          for (var match in data) {
-            if (match is Map) {
-              final typedMatch = Map<String, dynamic>.from(match);
-              result.add({
-                'match_id': typedMatch['match_id'] ?? 0,
-                'start_time': typedMatch['start_time'] ?? 0,
-                'duration': typedMatch['duration'] ?? 0,
-                'radiant_win': typedMatch['radiant_win'] ?? false,
-                'player_slot': typedMatch['player_slot'] ?? 0,
-                'hero_id': typedMatch['hero_id'] ?? 0,
-                'kills': typedMatch['kills'] ?? 0,
-                'deaths': typedMatch['deaths'] ?? 0,
-                'assists': typedMatch['assists'] ?? 0,
-                'lobby_type': typedMatch['lobby_type'] ?? 0,
-                'game_mode': typedMatch['game_mode'] ?? 0,
-              });
+          final retryResponse = await _client.get(Uri.parse(url));
+          if (retryResponse.statusCode == 200) {
+            final data = json.decode(retryResponse.body) as List;
+            print('Matches with friend count (retry $attempt): ${data.length}');
+            
+            final List<Map<String, dynamic>> result = [];
+            
+            for (var match in data) {
+              if (match is Map) {
+                final typedMatch = Map<String, dynamic>.from(match);
+                result.add({
+                  'match_id': typedMatch['match_id'] ?? 0,
+                  'start_time': typedMatch['start_time'] ?? 0,
+                  'duration': typedMatch['duration'] ?? 0,
+                  'radiant_win': typedMatch['radiant_win'] ?? false,
+                  'player_slot': typedMatch['player_slot'] ?? 0,
+                  'hero_id': typedMatch['hero_id'] ?? 0,
+                  'kills': typedMatch['kills'] ?? 0,
+                  'deaths': typedMatch['deaths'] ?? 0,
+                  'assists': typedMatch['assists'] ?? 0,
+                  'lobby_type': typedMatch['lobby_type'] ?? 0,
+                  'game_mode': typedMatch['game_mode'] ?? 0,
+                });
+              }
             }
+            
+            // Сохраняем в кэш
+            _cache[cacheKey] = {
+              'data': result,
+              'timestamp': DateTime.now(),
+            };
+            
+            print('✅ Successfully loaded ${result.length} matches with friend (after retry $attempt)');
+            return result;
+            
+          } else if (retryResponse.statusCode == 429) {
+            print('⚠️ Still rate limited after attempt $attempt');
+            continue;
+          } else {
+            print('❌ Different error after retry $attempt: ${retryResponse.statusCode}');
+            break;
           }
-          
-          // Сохраняем в кэш
-          _cache[cacheKey] = {
-            'data': result,
-            'timestamp': DateTime.now(),
-          };
-          
-          print('✅ Successfully loaded ${result.length} matches with friend (after retry)');
-          return result;
-        } else {
-          print('⚠️ Retry failed with status: ${retryResponse.statusCode}');
-          return <Map<String, dynamic>>[];
         }
+        
+        print('❌ All retry attempts failed, returning empty list');
+        return <Map<String, dynamic>>[];
+        
       } else if (response.statusCode == 404) {
         print('⚠️ No matches found with friend (404)');
+        
+        // Кэшируем пустой результат чтобы не запрашивать снова
+        _cache[cacheKey] = {
+          'data': <Map<String, dynamic>>[],
+          'timestamp': DateTime.now(),
+        };
+        
         return <Map<String, dynamic>>[];
       } else {
         throw Exception('Failed to load matches with friend: ${response.statusCode}');
@@ -631,11 +779,22 @@ class SteamService {
     try {
       print('👫 Calculating friend stats for $steamId with $friendSteamId');
       
+      // Проверяем кэш
+      final cacheKey = 'friend_stats_${steamId}_$friendSteamId';
+      final cachedData = _cache[cacheKey];
+      if (cachedData != null) {
+        final cacheTime = cachedData['timestamp'] as DateTime;
+        if (DateTime.now().difference(cacheTime) < const Duration(hours: 2)) {
+          print('✅ Returning cached friend stats');
+          return cachedData['data'] as Map<String, dynamic>;
+        }
+      }
+      
       // Получаем совместные матчи
       final matches = await getPlayersMatches(steamId, friendSteamId);
       
       if (matches.isEmpty) {
-        return {
+        final emptyStats = {
           'total_games': 0,
           'wins': 0,
           'losses': 0,
@@ -647,6 +806,14 @@ class SteamService {
           'total_assists': 0,
           'avg_kda': 0.0,
         };
+        
+        // Кэшируем даже пустой результат
+        _cache[cacheKey] = {
+          'data': emptyStats,
+          'timestamp': DateTime.now(),
+        };
+        
+        return emptyStats;
       }
       
       int wins = 0;
@@ -693,6 +860,12 @@ class SteamService {
         'total_deaths': totalDeaths,
         'total_assists': totalAssists,
         'avg_kda': avgKda,
+      };
+      
+      // Сохраняем в кэш
+      _cache[cacheKey] = {
+        'data': result,
+        'timestamp': DateTime.now(),
       };
       
       print('✅ Calculated friend stats: $result');

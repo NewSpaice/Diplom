@@ -1,16 +1,35 @@
-# diplom
+# Dota 2 Stats
 
-A new Flutter project.
+Flutter приложение для просмотра статистики Dota 2.
 
-## Getting Started
+## Установка на устройство
 
-This project is a starting point for a Flutter application.
+1. Скачайте APK файл из папки `build/app/outputs/flutter-apk/app-debug.apk`
+2. Включите "Установку из неизвестных источников" в настройках Android
+3. Установите APK файл
 
-A few resources to get you started if this is your first Flutter project:
+## Тестирование Deep Links
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+Для тестирования входа через Steam на реальном устройстве используйте:
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+```bash
+# Тест deep link через ADB
+adb shell am start \
+  -W -a android.intent.action.VIEW \
+  -d "dotastats://auth/steam/callback?openid.claimed_id=https://steamcommunity.com/openid/id/76561198000000000" \
+  com.example.diplom
+```
+
+## Как работает аутентификация
+
+1. Пользователь нажимает "Войти через Steam"
+2. Открывается браузер с URL: `https://steamcommunity.com/openid/login`
+3. После входа Steam перенаправляет на: `dotastats://auth/steam/callback`
+4. Android запускает приложение через deep link
+5. Приложение извлекает Steam ID из URL параметров
+6. Пользователь автоматически входит в приложение
+
+## Требования
+
+- Flutter SDK
+- Steam API ключ (получить на https://steamcommunity.com/dev/apikey)
