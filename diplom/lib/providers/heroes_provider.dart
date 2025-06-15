@@ -199,6 +199,26 @@ class HeroesProvider extends ChangeNotifier {
     notifyListeners();
   }
   
+  // Сортировка по типу (с автоматическим переключением направления)
+  void sort(HeroSortType type) {
+    if (_currentSortType == type) {
+      // Если тот же тип, переключаем направление
+      toggleSortDirection();
+    } else {
+      // Новый тип сортировки, устанавливаем по убыванию
+      _currentSortType = type;
+      _currentSortDirection = SortDirection.descending;
+      notifyListeners();
+    }
+  }
+  
+  // Сброс сортировки
+  void resetSorting() {
+    _currentSortType = HeroSortType.games;
+    _currentSortDirection = SortDirection.descending;
+    notifyListeners();
+  }
+  
   // Переключение направления сортировки
   void toggleSortDirection() {
     _currentSortDirection = _currentSortDirection == SortDirection.descending

@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../services/steam_service.dart';
+import '../services/cache_manager.dart';
 import '../providers/steam_api_provider.dart';
 import '../providers/theme_provider.dart';
+import '../providers/friends_provider.dart';
 
 enum SortType {
   games,
@@ -26,182 +28,64 @@ class FriendsStatsScreen extends StatefulWidget {
 
 class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
   bool _isLoading = true;
-  List<Map<String, dynamic>> _friends = [];
-  List<Map<String, dynamic>> _friendsWithGames = []; // Только друзья с играми
-  Map<String, Map<String, dynamic>> _friendsStats = {};
-  String? _errorMessage;
-  SteamService? _steamService;
-
-  // Сортировка
+  FriendsProvider? _friendsProvider;
   bool _showSorting = false;
-  SortType? _currentSortType;
-  SortDirection _currentSortDirection = SortDirection.descending;
 
   @override
   void initState() {
     super.initState();
-    _loadFriendsAndStats();
+    _initializeFriends();
   }
 
-  Future<void> _loadFriendsAndStats() async {
+  Future<void> _initializeFriends() async {
     try {
-      print('👥 Loading friends and shared stats...');
-      
       final apiProvider = context.read<SteamApiProvider>();
-      if (apiProvider.apiKey == null) {
+      final apiKey = apiProvider.apiKey;
+      
+      if (apiKey == null || apiKey.isEmpty) {
         throw Exception('API ключ не установлен');
       }
       
       final prefs = await SharedPreferences.getInstance();
-      _steamService = SteamService(apiProvider.apiKey!, prefs);
+      final cacheManager = CacheManager(prefs);
+      final steamService = SteamService(apiKey, prefs);
       
-      // Загружаем список друзей
-      final friendsData = await _steamService!.getFriendsList(widget.steamId);
-      print('📊 Friends data received');
+      _friendsProvider = FriendsProvider(
+        steamId: widget.steamId,
+        cacheManager: cacheManager,
+        steamService: steamService,
+      );
       
-      if (friendsData['friendslist'] != null && friendsData['friendslist']['friends'] != null) {
-        final friendsList = friendsData['friendslist']['friends'] as List;
-        
-        // Приводим к правильному типу
-        final typedFriends = friendsList.map((friend) {
-          if (friend is Map<String, dynamic>) {
-            return friend;
-          } else if (friend is Map) {
-            return Map<String, dynamic>.from(friend);
-          } else {
-            throw Exception('Неверный тип данных друга');
-          }
-        }).toList();
-        
-        setState(() {
-          _friends = typedFriends;
-        });
-        
-        // Загружаем статистику для каждого друга
-        final friendsToProcess = _friends;
-        print('📈 Loading stats for ${friendsToProcess.length} friends...');
-        
-        for (int i = 0; i < friendsToProcess.length; i++) {
-          final friend = friendsToProcess[i];
-          final friendSteamId = friend['steamid'];
-          
-          if (friendSteamId != null) {
-            try {
-              print('Loading stats for friend ${i + 1}/${friendsToProcess.length}: $friendSteamId');
-              final stats = await _steamService!.getFriendStats(widget.steamId, friendSteamId);
-              
-              setState(() {
-                _friendsStats[friendSteamId] = stats;
-                
-                // Добавляем друга в список только если есть совместные игры в Dota 2
-                if ((stats['total_games'] as int) > 0) {
-                  final friendWithStats = Map<String, dynamic>.from(friend);
-                  friendWithStats.addAll(stats);
-                  _friendsWithGames.add(friendWithStats);
-                }
-              });
-              
-              // Небольшая задержка между запросами
-              if (i < friendsToProcess.length - 1) {
-                await Future.delayed(const Duration(milliseconds: 500));
-              }
-            } catch (e) {
-              print('❌ Error loading stats for friend $friendSteamId: $e');
-              // Продолжаем с другими друзьями
-            }
-          }
+      // Добавляем слушатель для обновления UI
+      _friendsProvider!.addListener(() {
+        if (mounted) {
+          setState(() {});
         }
-        
-        // Применяем начальную сортировку
-        _applySorting();
-      }
-      
-      setState(() {
-        _isLoading = false;
-        _errorMessage = null;
       });
       
-      print('✅ Successfully loaded friends and stats');
-      
-    } catch (e) {
-      print('❌ Error loading friends: $e');
-      setState(() {
-        _friends = [];
-        _friendsWithGames = [];
-        _friendsStats = {};
-        _isLoading = false;
-        _errorMessage = e.toString();
-      });
+      await _friendsProvider!.initialize();
       
       if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Ошибка загрузки друзей: $e'),
+            content: Text('Ошибка инициализации друзей: $e'),
             duration: const Duration(seconds: 5),
-            action: SnackBarAction(
-              label: 'Повторить',
-              onPressed: () {
-                setState(() {
-                  _isLoading = true;
-                  _errorMessage = null;
-                  _friendsStats.clear();
-                  _friendsWithGames.clear();
-                });
-                _loadFriendsAndStats();
-              },
-            ),
           ),
         );
       }
     }
   }
 
-  void _applySorting() {
-    setState(() {
-      if (_currentSortType == SortType.games) {
-        _friendsWithGames.sort((a, b) => _compareFriends(a, b, SortType.games));
-      } else if (_currentSortType == SortType.winRate) {
-        _friendsWithGames.sort((a, b) => _compareFriends(a, b, SortType.winRate));
-      }
-    });
-  }
-
-  int _compareFriends(Map<String, dynamic> a, Map<String, dynamic> b, SortType type) {
-    int comparison = 0;
-    
-    if (type == SortType.games) {
-      comparison = (a['total_games'] as int).compareTo(b['total_games'] as int);
-    } else if (type == SortType.winRate) {
-      final winRateA = a['win_rate'] as double;
-      final winRateB = b['win_rate'] as double;
-      comparison = winRateA.compareTo(winRateB);
-    }
-    
-    // Применяем направление сортировки
-    if (_currentSortDirection == SortDirection.descending) {
-      return -comparison;
-    }
-    return comparison;
-  }
-
-  void _toggleSort(SortType type) {
-    setState(() {
-      if (_currentSortType == type) {
-        // Если уже сортируем по этому типу, меняем направление
-        _currentSortDirection = _currentSortDirection == SortDirection.descending 
-            ? SortDirection.ascending 
-            : SortDirection.descending;
-      } else {
-        // Если новый тип сортировки, устанавливаем по убыванию по умолчанию
-        _currentSortType = type;
-        _currentSortDirection = SortDirection.descending;
-      }
-    });
-    _applySorting();
-  }
-
   @override
   void dispose() {
+    _friendsProvider?.dispose();
     super.dispose();
   }
 
@@ -211,15 +95,6 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
       appBar: AppBar(
         title: const Text('Статистика с друзьями'),
         actions: [
-          IconButton(
-            icon: Icon(_showSorting ? Icons.sort : Icons.sort),
-            onPressed: () {
-              setState(() {
-                _showSorting = !_showSorting;
-              });
-            },
-            tooltip: _showSorting ? 'Скрыть сортировку' : 'Показать сортировку',
-          ),
           IconButton(
             icon: Icon(
               context.watch<ThemeProvider>().isDarkMode
@@ -232,6 +107,20 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
             tooltip: context.watch<ThemeProvider>().isDarkMode
                 ? 'Светлая тема'
                 : 'Темная тема',
+          ),
+          IconButton(
+            icon: const Icon(Icons.sort),
+            onPressed: () {
+              setState(() {
+                _showSorting = !_showSorting;
+              });
+            },
+            tooltip: 'Сортировка',
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _friendsProvider?.forceRefresh(),
+            tooltip: 'Обновить',
           ),
         ],
       ),
@@ -246,146 +135,100 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
                 ],
               ),
             )
-          : _errorMessage != null
+          : _friendsProvider?.friendsWithGames.isEmpty == true
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Icon(
-                        Icons.error_outline,
+                        Icons.people_outline,
                         size: 64,
-                        color: Colors.red[300],
+                        color: Colors.grey[400],
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'Ошибка загрузки',
+                        'Нет совместных игр',
                         style: TextStyle(
                           fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.red[300],
+                          color: Colors.grey[600],
                         ),
                       ),
                       const SizedBox(height: 8),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 32),
-                        child: Text(
-                          _errorMessage!,
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: Colors.grey[600],
-                          ),
+                      Text(
+                        'У вас нет друзей, с которыми играли в Dota 2',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey[500],
                         ),
-                      ),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            _isLoading = true;
-                            _errorMessage = null;
-                            _friendsStats.clear();
-                            _friendsWithGames.clear();
-                          });
-                          _loadFriendsAndStats();
-                        },
-                        child: const Text('Повторить'),
                       ),
                     ],
                   ),
                 )
-              : _friendsWithGames.isEmpty
-                  ? Center(
+              : Column(
+                  children: [
+                    // Заголовок с общей информацией
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16.0),
+                      color: Theme.of(context).cardColor,
                       child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(
-                            Icons.people_outline,
-                            size: 64,
-                            color: Colors.grey[400],
-                          ),
-                          const SizedBox(height: 16),
                           Text(
-                            'Нет совместных игр',
-                            style: TextStyle(
+                            'Друзей с совместными играми: ${_friendsProvider?.friendsWithGames.length}',
+                            style: const TextStyle(
                               fontSize: 18,
-                              color: Colors.grey[600],
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            'У вас нет друзей, с которыми играли в Dota 2',
-                            textAlign: TextAlign.center,
-                            style: TextStyle(
-                              color: Colors.grey[500],
+                              fontWeight: FontWeight.bold,
                             ),
                           ),
                         ],
                       ),
-                    )
-                  : Column(
-                      children: [
-                        // Заголовок с общей информацией
-                        Container(
-                          width: double.infinity,
-                          padding: const EdgeInsets.all(16.0),
-                          color: Theme.of(context).cardColor,
-                          child: Column(
-                            children: [
-                              Text(
-                                'Друзей с совместными играми: ${_friendsWithGames.length}',
-                                style: const TextStyle(
-                                  fontSize: 18,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        
-                        // Панель сортировки
-                        if (_showSorting && _friendsWithGames.isNotEmpty) _buildSortingPanel(),
-                        
-                        // Список друзей с совместной статистикой
-                        Expanded(
-                          child: _friendsWithGames.isEmpty
-                              ? Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      Icon(
-                                        Icons.sort,
-                                        size: 64,
-                                        color: Colors.grey[400],
-                                      ),
-                                      const SizedBox(height: 16),
-                                      Text(
-                                        'Нет друзей для сортировки',
-                                        style: TextStyle(
-                                          fontSize: 18,
-                                          color: Colors.grey[600],
-                                        ),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Text(
-                                        'Попробуйте добавить друзей',
-                                        textAlign: TextAlign.center,
-                                        style: TextStyle(
-                                          color: Colors.grey[500],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                )
-                              : ListView.builder(
-                                  padding: const EdgeInsets.all(8.0),
-                                  itemCount: _friendsWithGames.length,
-                                  itemBuilder: (context, index) {
-                                    final friend = _friendsWithGames[index];
-                                    return _buildFriendCard(friend);
-                                  },
-                                ),
-                        ),
-                      ],
                     ),
+                    
+                    // Панель сортировки
+                    if (_showSorting && _friendsProvider?.friendsWithGames.isNotEmpty == true) _buildSortingPanel(),
+                    
+                    // Список друзей с совместной статистикой
+                    Expanded(
+                      child: _friendsProvider?.friendsWithGames.isEmpty == true
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    Icons.sort,
+                                    size: 64,
+                                    color: Colors.grey[400],
+                                  ),
+                                  const SizedBox(height: 16),
+                                  Text(
+                                    'Нет друзей для сортировки',
+                                    style: TextStyle(
+                                      fontSize: 18,
+                                      color: Colors.grey[600],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    'Попробуйте добавить друзей',
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      color: Colors.grey[500],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : ListView.builder(
+                              padding: const EdgeInsets.all(8.0),
+                              itemCount: _friendsProvider?.friendsWithGames.length,
+                              itemBuilder: (context, index) {
+                                final friend = _friendsProvider?.friendsWithGames[index];
+                                return friend != null ? _buildFriendCard(friend) : const SizedBox.shrink();
+                              },
+                            ),
+                    ),
+                  ],
+                ),
     );
   }
 
@@ -425,10 +268,8 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
               TextButton(
                 onPressed: () {
                   setState(() {
-                    _currentSortType = SortType.games;
-                    _currentSortDirection = SortDirection.descending;
+                    _friendsProvider?.resetSorting();
                   });
-                  _applySorting();
                 },
                 child: const Text('Сбросить'),
               ),
@@ -449,25 +290,25 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: () => _toggleSort(SortType.games),
+              onPressed: () {
+                setState(() {
+                  _friendsProvider?.sortByGames();
+                });
+              },
               icon: Icon(
-                _currentSortType == SortType.games
-                    ? (_currentSortDirection == SortDirection.descending ? Icons.arrow_downward : Icons.arrow_upward)
-                    : Icons.sort,
+                Icons.sort,
                 size: 18,
-                color: _currentSortType == SortType.games ? Colors.white : null,
+                color: Colors.white,
               ),
               label: Text(
-                _currentSortType == SortType.games
-                    ? (_currentSortDirection == SortDirection.descending ? 'Больше → Меньше' : 'Меньше → Больше')
-                    : 'Сортировать по играм',
+                'Сортировать по играм',
                 style: TextStyle(
                   fontSize: 14,
-                  color: _currentSortType == SortType.games ? Colors.white : null,
+                  color: Colors.white,
                 ),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: _currentSortType == SortType.games ? Colors.blue : null,
+                backgroundColor: Colors.blue,
                 padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
               ),
             ),
@@ -488,25 +329,25 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: () => _toggleSort(SortType.winRate),
+              onPressed: () {
+                setState(() {
+                  _friendsProvider?.sortByWinRate();
+                });
+              },
               icon: Icon(
-                _currentSortType == SortType.winRate
-                    ? (_currentSortDirection == SortDirection.descending ? Icons.arrow_downward : Icons.arrow_upward)
-                    : Icons.sort,
+                Icons.sort,
                 size: 18,
-                color: _currentSortType == SortType.winRate ? Colors.white : null,
+                color: Colors.white,
               ),
               label: Text(
-                _currentSortType == SortType.winRate
-                    ? (_currentSortDirection == SortDirection.descending ? 'Высокий → Низкий' : 'Низкий → Высокий')
-                    : 'Сортировать по винрейту',
+                'Сортировать по винрейту',
                 style: TextStyle(
                   fontSize: 14,
-                  color: _currentSortType == SortType.winRate ? Colors.white : null,
+                  color: Colors.white,
                 ),
               ),
               style: ElevatedButton.styleFrom(
-                backgroundColor: _currentSortType == SortType.winRate ? Colors.green : null,
+                backgroundColor: Colors.green,
                 padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
               ),
             ),
@@ -531,9 +372,9 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    _currentSortType != null
-                        ? 'Сортировка: ${_getSortDescription()} • Показано: ${_friendsWithGames.length} друзей'
-                        : 'Показано: ${_friendsWithGames.length} друзей',
+                    _friendsProvider?.currentSortType != null
+                        ? 'Сортировка: ${_getSortDescription()} • Показано: ${_friendsProvider?.friendsWithGames.length} друзей'
+                        : 'Показано: ${_friendsProvider?.friendsWithGames.length} друзей',
                     style: TextStyle(
                       fontSize: 12,
                       color: Colors.blue[600],
@@ -710,10 +551,10 @@ class _FriendsStatsScreenState extends State<FriendsStatsScreen> {
   }
 
   String _getSortDescription() {
-    if (_currentSortType == SortType.games) {
-      return _currentSortDirection == SortDirection.ascending ? 'По возрастанию количества игр' : 'По убыванию количества игр';
-    } else if (_currentSortType == SortType.winRate) {
-      return _currentSortDirection == SortDirection.ascending ? 'По возрастанию винрейта' : 'По убыванию винрейта';
+    if (_friendsProvider?.currentSortType == SortType.games) {
+      return _friendsProvider?.currentSortDirection == SortDirection.ascending ? 'По возрастанию количества игр' : 'По убыванию количества игр';
+    } else if (_friendsProvider?.currentSortType == SortType.winRate) {
+      return _friendsProvider?.currentSortDirection == SortDirection.ascending ? 'По возрастанию винрейта' : 'По убыванию винрейта';
     }
     return 'Неизвестная сортировка';
   }

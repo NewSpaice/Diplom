@@ -31,6 +31,7 @@ class FriendsProvider extends ChangeNotifier {
   
   // Геттеры
   List<Map<String, dynamic>> get friends => _friendsWithGames;
+  List<Map<String, dynamic>> get friendsWithGames => _friendsWithGames;
   bool get isLoading => _isLoading;
   bool get isRefreshing => _isRefreshing;
   String? get errorMessage => _errorMessage;
@@ -197,6 +198,30 @@ class FriendsProvider extends ChangeNotifier {
       _currentSortDirection = SortDirection.descending;
     }
     
+    _applySorting();
+    notifyListeners();
+  }
+  
+  // Сброс сортировки
+  void resetSorting() {
+    _currentSortType = null;
+    _currentSortDirection = SortDirection.descending;
+    _applySorting();
+    notifyListeners();
+  }
+  
+  // Сортировка по играм
+  void sortByGames() {
+    _currentSortType = SortType.games;
+    _currentSortDirection = SortDirection.descending;
+    _applySorting();
+    notifyListeners();
+  }
+  
+  // Сортировка по винрейту
+  void sortByWinRate() {
+    _currentSortType = SortType.winRate;
+    _currentSortDirection = SortDirection.descending;
     _applySorting();
     notifyListeners();
   }

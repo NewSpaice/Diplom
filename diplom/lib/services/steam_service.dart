@@ -977,6 +977,73 @@ class SteamService {
     return 'ranks/rank_icon_$rankTier.png';
   }
   
+  // Загрузка истории матчей с возможностью указать начальную точку
+  Future<Map<String, dynamic>> getMatchHistoryBatch(
+    String steamId, {
+    int? startAt,
+    int limit = 100,
+  }) async {
+    try {
+      final accountId = _convertToAccountId(steamId);
+      String url = '$_baseUrl$_dota2Api/GetMatchHistory/v1/?key=$apiKey&account_id=$accountId&matches_requested=$limit';
+      
+      if (startAt != null) {
+        url += '&start_at_match_id=$startAt';
+      }
+      
+      print('📥 Fetching batch from Steam API: $url');
+      
+      final response = await _client.get(Uri.parse(url));
+      print('Batch response status: ${response.statusCode}');
+      
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['result'] != null && data['result']['matches'] != null) {
+          final matches = data['result']['matches'] as List;
+          
+          // Получаем детали для каждого матча в батче
+          for (var match in matches) {
+            try {
+              final matchId = match['match_id'].toString();
+              final details = await _getMatchDetails(matchId);
+              if (details != null) {
+                // Добавляем информацию о победе
+                match['radiant_win'] = details['radiant_win'];
+                // Добавляем статистику игрока
+                final player = (details['players'] as List).firstWhere(
+                  (p) => p['account_id'].toString() == accountId,
+                  orElse: () => {},
+                );
+                if (player.isNotEmpty) {
+                  match['player_stats'] = {
+                    'kills': player['kills'] ?? 0,
+                    'deaths': player['deaths'] ?? 0,
+                    'assists': player['assists'] ?? 0,
+                    'gold_per_min': player['gold_per_min'] ?? 0,
+                    'xp_per_min': player['xp_per_min'] ?? 0,
+                    'hero_damage': player['hero_damage'] ?? 0,
+                    'hero_healing': player['hero_healing'] ?? 0,
+                  };
+                }
+              }
+            } catch (e) {
+              print('Error loading match details for ${match['match_id']}: $e');
+            }
+            
+            // Добавляем небольшую задержку между запросами деталей
+            await Future.delayed(const Duration(milliseconds: 100));
+          }
+          
+          return data;
+        }
+      }
+      throw Exception('Failed to load match history batch: ${response.statusCode}');
+    } catch (e) {
+      print('Error in getMatchHistoryBatch: $e');
+      rethrow;
+    }
+  }
+  
   void dispose() {
     _client.close();
   }

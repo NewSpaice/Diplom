@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../services/steam_service.dart';
+import '../services/cache_manager.dart';
 import '../providers/steam_api_provider.dart';
 import '../providers/theme_provider.dart';
+import '../providers/profile_provider.dart';
 import 'package:provider/provider.dart';
+import '../services/database_helper.dart';
 
 class ProfileScreen extends StatefulWidget {
   final String steamId;
@@ -16,76 +19,70 @@ class ProfileScreen extends StatefulWidget {
 
 class _ProfileScreenState extends State<ProfileScreen> {
   bool _isLoading = true;
-  Map<String, dynamic>? _profileData;
-  Map<String, dynamic>? _statsData;
-  SteamService? _steamService;
+  ProfileProvider? _profileProvider;
+  bool _isInitialized = false;
 
-bool _isInitialized = false;
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
 
-@override
-void didChangeDependencies() {
-  super.didChangeDependencies();
-
-  if (!_isInitialized) {
-    _loadProfile();
-    _isInitialized = true;
-  }
-}
-
-  Future<void> _loadProfile() async {
-  try {
-    final apiProvider = Provider.of<SteamApiProvider>(context, listen: false);
-    if (apiProvider.apiKey == null) {
-      throw Exception('API ключ не установлен');
+    if (!_isInitialized) {
+      _initializeProfile();
+      _isInitialized = true;
     }
+  }
 
-    final prefs = await SharedPreferences.getInstance();
-    _steamService = SteamService(apiProvider.apiKey!, prefs);
-    
-    // Загружаем константы рангов
-    await _steamService!.getRankConstants();
-
-    // Сначала загружаем профиль
-    final profileData = await _steamService!.getPlayerProfile(widget.steamId);
-    
-    // Загружаем статистику отдельно, чтобы при ошибке основной профиль все равно показался
-    Map<String, dynamic>? statsData;
+  Future<void> _initializeProfile() async {
     try {
-      statsData = await _steamService!.getPlayerStats(widget.steamId);
-    } catch (e) {
-      print('Error loading player stats: $e');
-      // Статистика не загрузилась, но это не критично
-    }
-
-    setState(() {
-      _profileData = profileData;
-      _statsData = statsData;
-      _isLoading = false;
-    });
-  } catch (e) {
-    setState(() {
-      _isLoading = false;
-    });
-
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Ошибка загрузки профиля: $e'),
-          duration: const Duration(seconds: 5),
-          action: SnackBarAction(
-            label: 'Повторить',
-            onPressed: () {
-              setState(() {
-                _isLoading = true;
-              });
-              _loadProfile();
-            },
-          ),
-        ),
+      final apiProvider = context.read<SteamApiProvider>();
+      final apiKey = apiProvider.apiKey;
+      
+      if (apiKey == null || apiKey.isEmpty) {
+        throw Exception('API ключ не установлен');
+      }
+      
+      final prefs = await SharedPreferences.getInstance();
+      final cacheManager = CacheManager(prefs);
+      final steamService = SteamService(apiKey, prefs);
+      
+      _profileProvider = ProfileProvider(
+        steamId: widget.steamId,
+        cacheManager: cacheManager,
+        steamService: steamService,
       );
+      
+      // Добавляем слушатель для обновления UI
+      _profileProvider!.addListener(() {
+        if (mounted) {
+          setState(() {});
+        }
+      });
+      
+      await _profileProvider!.initialize();
+      
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка инициализации профиля: $e'),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
     }
   }
-}
+
+  @override
+  void dispose() {
+    _profileProvider?.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -106,11 +103,46 @@ void didChangeDependencies() {
                 ? 'Светлая тема'
                 : 'Темная тема',
           ),
+          IconButton(
+            icon: const Icon(Icons.storage),
+            onPressed: () async {
+              try {
+                final prefs = await SharedPreferences.getInstance();
+                final apiProvider = context.read<SteamApiProvider>();
+                final steamService = SteamService(apiProvider.apiKey!, prefs);
+                final databaseHelper = DatabaseHelper();
+                final dbPath = await databaseHelper.getDatabasePath();
+                
+                if (mounted) {
+                  showDialog(
+                    context: context,
+                    builder: (context) => AlertDialog(
+                      title: const Text('Путь к базе данных'),
+                      content: SelectableText(dbPath),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: const Text('Закрыть'),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Ошибка: $e')),
+                  );
+                }
+              }
+            },
+            tooltip: 'Показать путь к БД',
+          ),
         ],
       ),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
-          : _profileData == null
+          : _profileProvider == null
               ? const Center(child: Text('Не удалось загрузить профиль'))
               : SingleChildScrollView(
                   padding: const EdgeInsets.all(16.0),
@@ -127,28 +159,28 @@ void didChangeDependencies() {
                         [
                           _buildInfoRow(
                             'Дата регистрации',
-                            _formatDate(_profileData!['response']['players'][0]['timecreated']),
+                            _formatDate(_profileProvider!.profileData!['response']['players'][0]['timecreated']),
                           ),
                           _buildInfoRow(
                             'Последний онлайн',
-                            _formatDate(_profileData!['response']['players'][0]['lastlogoff']),
+                            _formatDate(_profileProvider!.profileData!['response']['players'][0]['lastlogoff']),
                           ),
                         ],
                       ),
                       const SizedBox(height: 16),
                       
                       // Статистика Dota 2
-                      if (_statsData != null) ...[
+                      if (_profileProvider!.statsData != null) ...[
                         _buildInfoCard(
                           'Статистика Dota 2',
                           [
                             _buildInfoRow(
                               'Всего матчей',
-                              _statsData!['total_matches'].toString(),
+                              _profileProvider!.statsData!['total_matches'].toString(),
                             ),
                             _buildInfoRow(
                               'Победы',
-                              '${_statsData!['wins']} (${_statsData!['win_rate']?.toStringAsFixed(1) ?? '0.0'}%)',
+                              '${_profileProvider!.statsData!['wins']} (${_profileProvider!.statsData!['win_rate']?.toStringAsFixed(1) ?? '0.0'}%)',
                             ),
                           ],
                         ),
@@ -188,7 +220,7 @@ void didChangeDependencies() {
                       ],
                       
                       // Ранг
-                      if (_statsData != null && _statsData!['rank_tier'] != null && _statsData!['rank_tier'] > 0) ...[
+                      if (_profileProvider!.statsData != null && _profileProvider!.statsData!['rank_tier'] != null && _profileProvider!.statsData!['rank_tier'] > 0) ...[
                         _buildRankCard(),
                         const SizedBox(height: 16),
                       ],
@@ -199,7 +231,7 @@ void didChangeDependencies() {
   }
 
   Widget _buildPlayerCard() {
-    final player = _profileData!['response']['players'][0];
+    final player = _profileProvider!.profileData!['response']['players'][0];
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
@@ -248,8 +280,8 @@ void didChangeDependencies() {
   }
 
   Widget _buildRankCard() {
-    final rankTier = _statsData!['rank_tier'];
-    final leaderboardRank = _statsData!['leaderboard_rank'];
+    final rankTier = _profileProvider!.statsData!['rank_tier'];
+    final leaderboardRank = _profileProvider!.statsData!['leaderboard_rank'];
     
     return Card(
       child: Padding(
@@ -419,21 +451,18 @@ void didChangeDependencies() {
   }
 
   String _getRankImageUrl(int rankTier) {
-    String imagePath;
-    
-    if (_steamService != null) {
-      imagePath = _steamService!.getRankImageUrl(rankTier);
+    if (_profileProvider != null) {
+      final imagePath = _profileProvider!.getRankImageUrl(rankTier);
+      print('🏅 Rank $rankTier medal image path: $imagePath');
+      return imagePath;
     } else {
-      // Fallback если steamService не инициализирован - используем локальные ассеты
-      if (rankTier == 0) {
-        imagePath = 'ranks/rank_icon_0.png';
-      } else {
-        imagePath = 'ranks/rank_icon_$rankTier.png';
-      }
+      // Fallback логика
+      if (rankTier == 0) return 'ranks/rank_icon_0.png';
+      if (rankTier >= 80) return 'ranks/rank_icon_${rankTier}.webp';
+      if (rankTier == 11) return 'ranks/rank-icon-11.png';
+      if (rankTier == 12) return 'ranks/rank_icon_12.png';
+      return 'ranks/rank_icon_${rankTier}.webp';
     }
-    
-    print('🏅 Rank $rankTier medal image path (WEBP): $imagePath');
-    return imagePath;
   }
 
   String _getOnlineStatus(int? personastate) {
@@ -475,21 +504,24 @@ void didChangeDependencies() {
 
   Color _getRankColor(int rankTier) {
     final rankNumber = (rankTier / 10).floor();
+    
     switch (rankNumber) {
+      case 0:
+        return Colors.grey;
       case 1:
         return Colors.brown;
       case 2:
-        return Colors.grey;
+        return Colors.green;
       case 3:
-        return Colors.orange;
+        return Colors.blue;
       case 4:
         return Colors.purple;
       case 5:
-        return Colors.blue;
+        return Colors.orange;
       case 6:
         return Colors.cyan;
       case 7:
-        return Colors.yellow[700]!;
+        return Colors.yellow;
       case 8:
         return Colors.red;
       default:

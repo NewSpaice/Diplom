@@ -46,6 +46,11 @@ class AppStateProvider extends ChangeNotifier {
   bool get backgroundRefreshEnabled => _backgroundRefreshEnabled;
   DateTime? get lastBackgroundRefresh => _lastBackgroundRefresh;
   
+  // Геттеры для сервисов
+  CacheManager? get cacheManager => _cacheManager;
+  DatabaseHelper? get databaseHelper => _databaseHelper;
+  SteamService? get steamService => _steamService;
+  
   AppStateProvider({
     required this.steamId,
     required SteamApiProvider apiProvider,

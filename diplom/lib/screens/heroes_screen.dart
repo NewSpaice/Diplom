@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../services/steam_service.dart';
+import '../services/cache_manager.dart';
 import '../providers/steam_api_provider.dart';
 import '../providers/theme_provider.dart';
+import '../providers/heroes_provider.dart';
 
 enum SortType {
   games,
@@ -27,129 +29,65 @@ class HeroesScreen extends StatefulWidget {
 
 class _HeroesScreenState extends State<HeroesScreen> {
   bool _isLoading = true;
-  List<Map<String, dynamic>> _playerHeroes = [];
-  List<Map<String, dynamic>> _filteredHeroes = [];
-  String? _errorMessage;
-  SteamService? _steamService;
-  
-  // Фильтры
-  SortType _currentSortType = SortType.games;
-  SortDirection _currentSortDirection = SortDirection.descending;
+  HeroesProvider? _heroesProvider;
   bool _showFilters = false;
 
   @override
   void initState() {
     super.initState();
-    _loadPlayerHeroes();
+    _initializeHeroes();
   }
 
-  Future<void> _loadPlayerHeroes() async {
+  Future<void> _initializeHeroes() async {
     try {
-      print('🦸 Loading player heroes stats...');
-      
       final apiProvider = context.read<SteamApiProvider>();
-      if (apiProvider.apiKey == null) {
+      final apiKey = apiProvider.apiKey;
+      
+      if (apiKey == null || apiKey.isEmpty) {
         throw Exception('API ключ не установлен');
       }
       
       final prefs = await SharedPreferences.getInstance();
-      _steamService = SteamService(apiProvider.apiKey!, prefs);
+      final cacheManager = CacheManager(prefs);
+      final steamService = SteamService(apiKey, prefs);
       
-      final playerHeroes = await _steamService!.getPlayerHeroes(widget.steamId);
-      print('📊 Player heroes data received: ${playerHeroes.length} heroes');
+      _heroesProvider = HeroesProvider(
+        steamId: widget.steamId,
+        cacheManager: cacheManager,
+        steamService: steamService,
+      );
       
-      setState(() {
-        _playerHeroes = playerHeroes;
-        _filteredHeroes = List.from(playerHeroes);
-        _isLoading = false;
-        _errorMessage = null;
+      // Добавляем слушатель для обновления UI
+      _heroesProvider!.addListener(() {
+        if (mounted) {
+          setState(() {});
+        }
       });
       
-      _applySorting();
-      print('✅ Successfully loaded player heroes stats');
-      
-    } catch (e) {
-      print('❌ Error loading player heroes: $e');
-      setState(() {
-        _playerHeroes = [];
-        _filteredHeroes = [];
-        _isLoading = false;
-        _errorMessage = e.toString();
-      });
+      await _heroesProvider!.initialize();
       
       if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _isLoading = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Ошибка загрузки статистики героев: $e'),
+            content: Text('Ошибка инициализации героев: $e'),
             duration: const Duration(seconds: 5),
-            action: SnackBarAction(
-              label: 'Повторить',
-              onPressed: () {
-                setState(() {
-                  _isLoading = true;
-                  _errorMessage = null;
-                });
-                _loadPlayerHeroes();
-              },
-            ),
           ),
         );
       }
     }
   }
 
-  void _applySorting() {
-    setState(() {
-      _filteredHeroes = List.from(_playerHeroes);
-      
-      switch (_currentSortType) {
-        case SortType.games:
-          _filteredHeroes.sort((a, b) {
-            final compare = (a['games'] as int).compareTo(b['games'] as int);
-            return _currentSortDirection == SortDirection.descending ? -compare : compare;
-          });
-          break;
-          
-        case SortType.winRate:
-          _filteredHeroes.sort((a, b) {
-            final compare = (a['win_rate'] as double).compareTo(b['win_rate'] as double);
-            return _currentSortDirection == SortDirection.descending ? -compare : compare;
-          });
-          break;
-          
-        case SortType.alphabetical:
-          _filteredHeroes.sort((a, b) {
-            final compare = (a['hero_name'] as String).compareTo(b['hero_name'] as String);
-            return _currentSortDirection == SortDirection.descending ? -compare : compare;
-          });
-          break;
-      }
-    });
-  }
-
-  void _changeSortType(SortType newType) {
-    setState(() {
-      if (_currentSortType == newType) {
-        // Если тот же тип сортировки, меняем направление
-        _currentSortDirection = _currentSortDirection == SortDirection.descending 
-            ? SortDirection.ascending 
-            : SortDirection.descending;
-      } else {
-        // Новый тип сортировки
-        _currentSortType = newType;
-        // Устанавливаем логичное направление по умолчанию
-        switch (newType) {
-          case SortType.games:
-          case SortType.winRate:
-            _currentSortDirection = SortDirection.descending;
-            break;
-          case SortType.alphabetical:
-            _currentSortDirection = SortDirection.ascending;
-            break;
-        }
-      }
-    });
-    _applySorting();
+  @override
+  void dispose() {
+    _heroesProvider?.dispose();
+    super.dispose();
   }
 
   @override
@@ -158,15 +96,6 @@ class _HeroesScreenState extends State<HeroesScreen> {
       appBar: AppBar(
         title: const Text('Статистика по героям'),
         actions: [
-          IconButton(
-            icon: Icon(_showFilters ? Icons.filter_list_off : Icons.filter_list),
-            onPressed: () {
-              setState(() {
-                _showFilters = !_showFilters;
-              });
-            },
-            tooltip: _showFilters ? 'Скрыть фильтры' : 'Показать фильтры',
-          ),
           IconButton(
             icon: Icon(
               context.watch<ThemeProvider>().isDarkMode
@@ -180,11 +109,33 @@ class _HeroesScreenState extends State<HeroesScreen> {
                 ? 'Светлая тема'
                 : 'Темная тема',
           ),
+          IconButton(
+            icon: const Icon(Icons.filter_list),
+            onPressed: () {
+              setState(() {
+                _showFilters = !_showFilters;
+              });
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _heroesProvider?.forceRefresh(),
+            tooltip: 'Обновить',
+          ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage != null
+      body: _isLoading || (_heroesProvider?.isLoading ?? false)
+          ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Загружаем статистику героев...'),
+                ],
+              ),
+            )
+          : (_heroesProvider?.errorMessage != null)
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -207,7 +158,7 @@ class _HeroesScreenState extends State<HeroesScreen> {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 32),
                         child: Text(
-                          _errorMessage!,
+                          _heroesProvider!.errorMessage!,
                           textAlign: TextAlign.center,
                           style: TextStyle(
                             color: Colors.grey[600],
@@ -216,42 +167,36 @@ class _HeroesScreenState extends State<HeroesScreen> {
                       ),
                       const SizedBox(height: 16),
                       ElevatedButton(
-                        onPressed: () {
-                          setState(() {
-                            _isLoading = true;
-                            _errorMessage = null;
-                          });
-                          _loadPlayerHeroes();
-                        },
+                        onPressed: () => _heroesProvider?.forceRefresh(),
                         child: const Text('Повторить'),
                       ),
                     ],
                   ),
                 )
-              : _playerHeroes.isEmpty
-                  ? Center(
+              : (_heroesProvider?.heroes.isEmpty ?? true)
+                  ? const Center(
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Icon(
                             Icons.casino_outlined,
                             size: 64,
-                            color: Colors.grey[400],
+                            color: Colors.grey,
                           ),
-                          const SizedBox(height: 16),
+                          SizedBox(height: 16),
                           Text(
                             'Нет статистики по героям',
                             style: TextStyle(
                               fontSize: 18,
-                              color: Colors.grey[600],
+                              color: Colors.grey,
                             ),
                           ),
-                          const SizedBox(height: 8),
+                          SizedBox(height: 8),
                           Text(
                             'Возможно, профиль приватный или игрок не играл в Dota 2',
                             textAlign: TextAlign.center,
                             style: TextStyle(
-                              color: Colors.grey[500],
+                              color: Colors.grey,
                             ),
                           ),
                         ],
@@ -267,16 +212,16 @@ class _HeroesScreenState extends State<HeroesScreen> {
                           child: Column(
                             children: [
                               Text(
-                                'Сыграно на ${_playerHeroes.length} героях',
+                                'Сыграно на ${_heroesProvider!.allHeroes.length} героях',
                                 style: const TextStyle(
                                   fontSize: 18,
                                   fontWeight: FontWeight.bold,
                                 ),
                               ),
-                              if (_playerHeroes.isNotEmpty) ...[
+                              if (_heroesProvider!.allHeroes.isNotEmpty) ...[
                                 const SizedBox(height: 8),
                                 Text(
-                                  'Всего игр: ${_playerHeroes.fold<int>(0, (sum, hero) => sum + (hero['games'] as int))}',
+                                  'Всего игр: ${_heroesProvider!.getStats()['total_games']}',
                                   style: TextStyle(
                                     color: Colors.grey[600],
                                   ),
@@ -293,9 +238,9 @@ class _HeroesScreenState extends State<HeroesScreen> {
                         Expanded(
                           child: ListView.builder(
                             padding: const EdgeInsets.all(8.0),
-                            itemCount: _filteredHeroes.length,
+                            itemCount: _heroesProvider!.heroes.length,
                             itemBuilder: (context, index) {
-                              final heroStats = _filteredHeroes[index];
+                              final heroStats = _heroesProvider!.heroes[index];
                               return _buildHeroCard(heroStats);
                             },
                           ),
@@ -340,63 +285,61 @@ class _HeroesScreenState extends State<HeroesScreen> {
             ],
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
+          Row(
             children: [
-              _buildSortChip(
-                'По играм',
-                SortType.games,
-                Icons.gamepad,
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _heroesProvider?.sort(HeroSortType.games),
+                  icon: const Icon(Icons.gamepad, size: 16),
+                  label: const Text('По играм'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _heroesProvider?.currentSortType == HeroSortType.games ? Colors.blue : null,
+                    foregroundColor: _heroesProvider?.currentSortType == HeroSortType.games ? Colors.white : null,
+                  ),
+                ),
               ),
-              _buildSortChip(
-                'По винрейту',
-                SortType.winRate,
-                Icons.percent,
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _heroesProvider?.sort(HeroSortType.winRate),
+                  icon: const Icon(Icons.percent, size: 16),
+                  label: const Text('По винрейту'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _heroesProvider?.currentSortType == HeroSortType.winRate ? Colors.green : null,
+                    foregroundColor: _heroesProvider?.currentSortType == HeroSortType.winRate ? Colors.white : null,
+                  ),
+                ),
               ),
-              _buildSortChip(
-                'По алфавиту',
-                SortType.alphabetical,
-                Icons.sort_by_alpha,
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _heroesProvider?.sort(HeroSortType.alphabetical),
+                  icon: const Icon(Icons.sort_by_alpha, size: 16),
+                  label: const Text('По алфавиту'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _heroesProvider?.currentSortType == HeroSortType.alphabetical ? Colors.purple : null,
+                    foregroundColor: _heroesProvider?.currentSortType == HeroSortType.alphabetical ? Colors.white : null,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _heroesProvider?.resetSorting(),
+                  icon: const Icon(Icons.clear, size: 16),
+                  label: const Text('Сброс'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.grey[300],
+                  ),
+                ),
               ),
             ],
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildSortChip(String label, SortType sortType, IconData icon) {
-    final isSelected = _currentSortType == sortType;
-    final isDescending = _currentSortDirection == SortDirection.descending;
-    
-    return FilterChip(
-      selected: isSelected,
-      label: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(
-            icon,
-            size: 18,
-            color: isSelected ? Colors.white : Colors.grey[600],
-          ),
-          const SizedBox(width: 4),
-          Text(label),
-          if (isSelected) ...[
-            const SizedBox(width: 4),
-            Icon(
-              isDescending ? Icons.arrow_downward : Icons.arrow_upward,
-              size: 16,
-              color: Colors.white,
-            ),
-          ],
-        ],
-      ),
-      onSelected: (_) => _changeSortType(sortType),
-      selectedColor: Theme.of(context).primaryColor,
-      checkmarkColor: Colors.white,
-      labelStyle: TextStyle(
-        color: isSelected ? Colors.white : Colors.grey[700],
-        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
       ),
     );
   }

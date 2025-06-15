@@ -271,6 +271,14 @@ class DatabaseHelper {
     };
   }
   
+  // Получение пути к базе данных
+  Future<String> getDatabasePath() async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, _databaseName);
+    print('📍 Database path: $path');
+    return path;
+  }
+  
   // Закрытие базы данных
   Future<void> close() async {
     final db = _database;

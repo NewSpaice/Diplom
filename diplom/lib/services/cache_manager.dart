@@ -58,6 +58,11 @@ class CacheManager {
     }
   }
   
+  Future<bool> needsRefresh(String key) async {
+    final isValid = await isCacheValid(key);
+    return !isValid;
+  }
+  
   Future<void> clearCache(String key) async {
     await _prefs.remove(key);
     await _removeTimestamp(key);
@@ -135,32 +140,41 @@ class CacheManager {
     }
   }
   
-  // Проверка необходимости обновления
-  Future<bool> needsRefresh(String key) async {
-    return !(await isCacheValid(key));
-  }
-  
   // Статистика кэша
   Future<Map<String, dynamic>> getCacheStats() async {
-    final timestamps = _getTimestamps();
-    final stats = <String, dynamic>{};
+    final keys = _prefs.getKeys();
+    int totalSize = 0;
+    int validEntries = 0;
+    int expiredEntries = 0;
     
-    for (final key in [_profileKey, _matchesKey, _heroesKey, _friendsKey]) {
-      final timestamp = timestamps[key];
-      if (timestamp != null) {
-        final date = DateTime.fromMillisecondsSinceEpoch(timestamp);
-        stats[key] = {
-          'last_updated': date.toIso8601String(),
-          'is_valid': await isCacheValid(key),
-        };
-      } else {
-        stats[key] = {
-          'last_updated': null,
-          'is_valid': false,
-        };
+    for (String key in keys) {
+      if (key.startsWith('cached_')) {
+        final value = _prefs.getString(key);
+        if (value != null) {
+          totalSize += value.length;
+          
+          try {
+            final cacheData = json.decode(value);
+            final timestamp = DateTime.fromMillisecondsSinceEpoch(cacheData['timestamp']);
+            
+            if (DateTime.now().difference(timestamp) <= _cacheValidDuration) {
+              validEntries++;
+            } else {
+              expiredEntries++;
+            }
+          } catch (e) {
+            expiredEntries++;
+          }
+        }
       }
     }
     
-    return stats;
+    return {
+      'total_entries': validEntries + expiredEntries,
+      'valid_entries': validEntries,
+      'expired_entries': expiredEntries,
+      'total_size_bytes': totalSize,
+      'cache_duration_minutes': _cacheValidDuration.inMinutes,
+    };
   }
 } 

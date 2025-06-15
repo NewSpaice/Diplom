@@ -22,6 +22,18 @@ class ProfileProvider extends ChangeNotifier {
   DateTime? get lastUpdated => _lastUpdated;
   bool get hasData => _profileData != null;
   
+  // Получение статистики из данных профиля
+  Map<String, dynamic>? get statsData => _profileData?['stats'];
+  
+  // Получение URL изображения ранга
+  String getRankImageUrl(int rankTier) {
+    if (rankTier == 0) return 'ranks/rank_icon_0.png'; // Без ранга
+    if (rankTier >= 80) return 'ranks/rank_icon_${rankTier}.webp'; // Immortal (webp)
+    if (rankTier == 11) return 'ranks/rank-icon-11.png'; // Специальный случай
+    if (rankTier == 12) return 'ranks/rank_icon_12.png'; // PNG формат
+    return 'ranks/rank_icon_${rankTier}.webp'; // Остальные в webp
+  }
+  
   ProfileProvider({
     required this.steamId,
     required CacheManager cacheManager,

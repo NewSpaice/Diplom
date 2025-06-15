@@ -15,6 +15,11 @@ import 'screens/api_key_screen.dart';
 import 'services/steam_auth_service.dart';
 import 'providers/steam_api_provider.dart';
 import 'providers/theme_provider.dart';
+import 'providers/app_state_provider.dart';
+import 'providers/matches_provider.dart';
+import 'services/steam_service.dart';
+import 'services/cache_manager.dart';
+import 'services/database_helper.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,8 +41,12 @@ void main() async {
   runApp(
     MultiProvider(
       providers: [
-        ChangeNotifierProvider(create: (_) => apiProvider),
-        ChangeNotifierProvider(create: (_) => themeProvider),
+        ChangeNotifierProvider(
+          create: (context) => themeProvider,
+        ),
+        ChangeNotifierProvider(
+          create: (context) => apiProvider,
+        ),
       ],
       child: MyApp(authService: authService),
     ),
@@ -166,6 +175,27 @@ class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
 
   @override
+  void initState() {
+    super.initState();
+    _loadSelectedIndex();
+  }
+
+  Future<void> _loadSelectedIndex() async {
+    final prefs = await SharedPreferences.getInstance();
+    final savedIndex = prefs.getInt('selected_tab_index') ?? 0;
+    if (mounted) {
+      setState(() {
+        _selectedIndex = savedIndex;
+      });
+    }
+  }
+
+  Future<void> _saveSelectedIndex(int index) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setInt('selected_tab_index', index);
+  }
+
+  @override
   Widget build(BuildContext context) {
     final List<Widget> screens = [
       ProfileScreen(steamId: widget.steamId),
@@ -182,6 +212,7 @@ class _HomeScreenState extends State<HomeScreen> {
           setState(() {
             _selectedIndex = index;
           });
+          _saveSelectedIndex(index);
         },
         destinations: const [
           NavigationDestination(

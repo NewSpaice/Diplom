@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:provider/provider.dart';
 import '../services/steam_service.dart';
+import '../services/cache_manager.dart';
+import '../services/database_helper.dart';
 import '../providers/steam_api_provider.dart';
 import '../providers/theme_provider.dart';
+import '../providers/matches_provider.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
@@ -18,161 +21,75 @@ class MatchesScreen extends StatefulWidget {
 
 class _MatchesScreenState extends State<MatchesScreen> {
   bool _isLoading = true;
-  List<dynamic> _matches = [];
   String _selectedHero = 'Все герои';
   String _selectedResult = 'Все результаты';
   List<String> _heroes = ['Все герои'];
-  Map<String, dynamic> _heroesData = {};
-  Map<String, dynamic> _itemsData = {};
+  MatchesProvider? _matchesProvider;
 
   @override
   void initState() {
     super.initState();
-    _loadMatches();
+    _initializeMatches();
   }
 
-  Future<void> _loadMatches() async {
-    if (!mounted) return;
-    
+  Future<void> _initializeMatches() async {
     try {
-      setState(() => _isLoading = true);
-      
       final apiProvider = context.read<SteamApiProvider>();
       final apiKey = apiProvider.apiKey;
-      print('Using API Key: $apiKey');
       
       if (apiKey == null || apiKey.isEmpty) {
         throw Exception('API ключ не установлен');
       }
       
       final prefs = await SharedPreferences.getInstance();
+      final cacheManager = CacheManager(prefs);
+      final databaseHelper = DatabaseHelper();
       final steamService = SteamService(apiKey, prefs);
       
-      // Загружаем данные последовательно для отладки
-      final matchesData = await steamService.getMatchHistory(widget.steamId);
-      if (!mounted) return;
+      _matchesProvider = MatchesProvider(
+        steamId: widget.steamId,
+        cacheManager: cacheManager,
+        steamService: steamService,
+        databaseHelper: databaseHelper,
+      );
       
-      try {
-        final heroesData = await steamService.getHeroes();
-        if (!mounted) return;
-        
-        print('Heroes data: $heroesData');
-        
-        if (heroesData != null && heroesData['result'] != null && heroesData['result']['heroes'] != null) {
-          final heroes = heroesData['result']['heroes'] as List;
-          print('Number of heroes loaded: ${heroes.length}');
-          
-          // Создаем Map для быстрого поиска героев по ID
-          final heroesMap = Map.fromEntries(
-            heroes.map((h) => MapEntry(h['id'], h['localized_name']))
-          );
-          
-          // Добавляем имена героев к матчам и загружаем длительность
-          final matches = matchesData['result']['matches'] ?? [];
-          
-          for (var match in matches) {
-            final player = match['players'].firstWhere(
-              (p) => p['account_id'].toString() == _convertToAccountId(widget.steamId),
-              orElse: () => {'hero_id': 0},
-            );
-            match['hero_name'] = heroesMap[player['hero_id']] ?? 'Неизвестный герой';
-          }
-          
-          // Загружаем длительность для всех матчей из OpenDota API
-          _loadMatchDurations(matches); // Убираем await чтобы не блокировать UI
-          
-          if (!mounted) return;
+      _matchesProvider!.addListener(() {
+        if (mounted) {
           setState(() {
-            _matches = matches;
-            _heroes = ['Все герои', ...heroes.map((h) => h['localized_name'] as String).toList()];
-            _isLoading = false;
+            _heroes = _matchesProvider!.heroes;
           });
-        } else {
-          print('Invalid heroes data format: $heroesData');
-          throw Exception('Неверный формат данных героев');
         }
-      } catch (heroError) {
-        print('Ошибка загрузки героев: $heroError');
-        if (!mounted) return;
+      });
+      
+      await _matchesProvider!.initialize();
+      
+      if (mounted) {
         setState(() {
-          _matches = matchesData['result']['matches'] ?? [];
-          _heroes = ['Все герои'];
           _isLoading = false;
+          _heroes = _matchesProvider!.heroes;
         });
       }
     } catch (e) {
-      if (!mounted) return;
-      setState(() => _isLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Ошибка загрузки матчей: $e'),
-          duration: const Duration(seconds: 5),
-          action: SnackBarAction(
-            label: 'Обновить API ключ',
-            onPressed: () {
-              Navigator.pushNamed(context, '/api-key');
-            },
+      if (mounted) {
+        setState(() => _isLoading = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Ошибка инициализации: $e'),
+            duration: const Duration(seconds: 5),
           ),
-        ),
-      );
-    }
-  }
-
-  Future<void> _loadMatchDurations(List<dynamic> matches) async {
-    // Загружаем длительность для всех матчей параллельно с ограничениями
-    final tasks = <Future<void>>[];
-    
-    // Убираем ограничение - загружаем для всех матчей
-    for (int i = 0; i < matches.length; i++) {
-      final match = matches[i];
-      tasks.add(_loadSingleMatchDuration(match, i * 50)); // Уменьшаем задержку до 50ms
-    }
-    
-    try {
-      await Future.wait(tasks);
-      print('Завершена загрузка длительности для ${matches.length} матчей');
-    } catch (e) {
-      print('Ошибка загрузки длительности матчей: $e');
-    }
-  }
-
-  Future<void> _loadSingleMatchDuration(Map<String, dynamic> match, int delayMs) async {
-    try {
-      // Добавляем задержку чтобы не перегружать API
-      await Future.delayed(Duration(milliseconds: delayMs));
-      
-      final matchId = match['match_id'];
-      print('Загружаем длительность для матча $matchId...');
-      
-      final response = await http.get(
-        Uri.parse('https://api.opendota.com/api/matches/$matchId'),
-      ).timeout(const Duration(seconds: 10)); // Увеличили таймаут
-      
-      if (response.statusCode == 200) {
-        final matchDetails = json.decode(response.body);
-        if (matchDetails['duration'] != null) {
-          match['duration'] = matchDetails['duration'];
-          print('✅ Загружена длительность для матча $matchId: ${matchDetails['duration']} сек');
-          // Обновляем UI в реальном времени
-          if (mounted) setState(() {});
-        } else {
-          print('⚠️ Нет данных о длительности для матча $matchId');
-        }
-      } else {
-        print('❌ HTTP ошибка ${response.statusCode} для матча $matchId');
+        );
       }
-    } catch (e) {
-      print('❌ Ошибка загрузки длительности для матча ${match['match_id']}: $e');
     }
   }
 
   List<dynamic> get _filteredMatches {
-    return _matches.where((match) {
+    if (_matchesProvider == null) return [];
+    
+    return _matchesProvider!.matches.where((match) {
       final heroName = match['hero_name'] ?? '';
       final heroMatch = _selectedHero == 'Все герои' || 
           heroName == _selectedHero;
       
-      // Получаем данные игрока для правильного определения победы/поражения
       final player = match['players'].firstWhere(
         (p) => p['account_id'].toString() == _convertToAccountId(widget.steamId),
         orElse: () => {'player_slot': 0},
@@ -182,8 +99,6 @@ class _MatchesScreenState extends State<MatchesScreen> {
       final isRadiant = playerSlot < 128;
       final radiantWin = match['radiant_win'] ?? false;
       final isWin = (isRadiant && radiantWin) || (!isRadiant && !radiantWin);
-      
-      print('Фильтр для матча ${match['match_id']}: playerSlot=$playerSlot, isRadiant=$isRadiant, radiantWin=$radiantWin, isWin=$isWin, selectedResult=$_selectedResult');
       
       final resultMatch = _selectedResult == 'Все результаты' ||
           (_selectedResult == 'Победа' && isWin) ||
@@ -216,19 +131,41 @@ class _MatchesScreenState extends State<MatchesScreen> {
             icon: const Icon(Icons.filter_list),
             onPressed: _showFilterDialog,
           ),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _matchesProvider?.forceRefresh(),
+            tooltip: 'Обновить',
+          ),
         ],
       ),
-      body: _isLoading
+      body: _isLoading || (_matchesProvider?.isLoading ?? false)
           ? const Center(child: CircularProgressIndicator())
-          : _matches.isEmpty
+          : (_matchesProvider?.matches.isEmpty ?? true)
               ? const Center(child: Text('Нет доступных матчей'))
-              : ListView.builder(
-                  itemCount: _filteredMatches.length,
-                  itemBuilder: (context, index) {
-                    final match = _filteredMatches[index];
-                    return _buildMatchCard(match);
-                  },
+              : Column(
+                  children: [
+                    if (_matchesProvider?.loadAllState == LoadAllMatchesState.loading)
+                      LinearProgressIndicator(
+                        value: _matchesProvider?.getLoadAllProgress() ?? 0.0,
+                      ),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: _filteredMatches.length,
+                        itemBuilder: (context, index) {
+                          final match = _filteredMatches[index];
+                          return _buildMatchCard(match);
+                        },
+                      ),
+                    ),
+                  ],
                 ),
+      floatingActionButton: (_matchesProvider?.loadAllState != LoadAllMatchesState.loading && _matchesProvider != null)
+          ? FloatingActionButton.extended(
+              onPressed: () => _matchesProvider!.loadAllMatches(),
+              label: const Text('Загрузить все матчи'),
+              icon: const Icon(Icons.download),
+            )
+          : null,
     );
   }
 
@@ -1424,7 +1361,7 @@ class _MatchesScreenState extends State<MatchesScreen> {
 
   @override
   void dispose() {
-    _isLoading = false;
+    _matchesProvider?.dispose();
     super.dispose();
   }
 } 
